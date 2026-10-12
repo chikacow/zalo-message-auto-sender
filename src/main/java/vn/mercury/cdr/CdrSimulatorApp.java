@@ -22,9 +22,11 @@ import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
 import java.io.*;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -50,6 +52,12 @@ public final class CdrSimulatorApp extends Application {
     private final ObservableList<CdrRow> rows = FXCollections.observableArrayList();
     private final TextField clientId = new TextField();
     private final PasswordField accessKey = new PasswordField();
+    private final TextField databaseHost = new TextField();
+    private final TextField databasePort = new TextField("5432");
+    private final TextField databaseName = new TextField();
+    private final TextField databaseSchema = new TextField("aax2");
+    private final TextField databaseUser = new TextField();
+    private final PasswordField databasePassword = new PasswordField();
     private final ComboBox<SessionIdMode> sessionIdMode = new ComboBox<>(FXCollections.observableArrayList(SessionIdMode.values()));
     private final TextField sessionIdValue = new TextField();
     private final Map<CdrType, IdFields> ids = new EnumMap<>(CdrType.class);
@@ -108,20 +116,25 @@ public final class CdrSimulatorApp extends Application {
         table.getColumns().add(selectColumn());
         table.getColumns().add(textColumn("Usage", "usage", 260));
         table.getColumns().add(textColumn("Note", "note", 220));
+        table.getColumns().add(textColumn("Data Usage", "dataUsage", 110));
+        table.getColumns().add(textColumn("Unit", "unit", 75));
+        table.getColumns().add(textColumn("Expected iNew", "expectedInew", 115));
+        table.getColumns().add(textColumn("Expected AAX", "expectedAax", 115));
         table.getColumns().add(useToolConfigColumn());
         table.getColumns().add(textColumn("Type", "type", 90));
         table.getColumns().add(textColumn("Session ID", "sessionId", 240));
         table.getColumns().add(textColumn("Status", "status", 160));
         table.getColumns().add(resultColumn());
+        table.getColumns().add(textColumn("Database Check", "databaseCheck", 360));
         table.getColumns().add(textColumn("Request", "request", 360));
         table.getColumns().add(textColumn("Response", "response", 360));
         table.setPlaceholder(new Label("Import an Excel file with the Usage and Curl columns."));
 
-        VBox configuration = new VBox(10, buildClientConfiguration(), buildSessionIdConfiguration(), buildIdConfiguration(), buildGuide());
+        VBox configuration = new VBox(10, buildClientConfiguration(), buildIdConfiguration(), buildSessionIdConfiguration(), buildDatabaseConfiguration(), buildGuide());
         configuration.setPadding(new Insets(0, 0, 0, 12));
-        configuration.setPrefWidth(390);
+        configuration.setPrefWidth(430);
         SplitPane splitPane = new SplitPane(table, new ScrollPane(configuration));
-        splitPane.setDividerPositions(0.68);
+        splitPane.setDividerPositions(0.70);
         return splitPane;
     }
 
@@ -187,8 +200,34 @@ public final class CdrSimulatorApp extends Application {
         return titled("IDs by cURL type", grid);
     }
 
+    private Node buildDatabaseConfiguration() {
+        databaseHost.setPromptText("e.g. db.example.internal");
+        databaseName.setPromptText("Database name");
+        databaseUser.setPromptText("Read-only database user");
+        databasePassword.setPromptText("Password");
+        Button testButton = new Button("Test read-only connection");
+        testButton.setOnAction(event -> testDatabaseConnection());
+
+        GridPane grid = new GridPane();
+        grid.setHgap(8);
+        grid.setVgap(8);
+        grid.addRow(0, new Label("Host"), databaseHost);
+        grid.addRow(1, new Label("Port"), databasePort);
+        grid.addRow(2, new Label("Database"), databaseName);
+        grid.addRow(3, new Label("Schema"), databaseSchema);
+        grid.addRow(4, new Label("Username"), databaseUser);
+        grid.addRow(5, new Label("Password"), databasePassword);
+        grid.add(testButton, 1, 6);
+        for (Node field : List.of(databaseHost, databasePort, databaseName, databaseSchema, databaseUser, databasePassword)) {
+            GridPane.setHgrow(field, Priority.ALWAYS);
+        }
+        Label notice = new Label("The application executes fixed SELECT queries only. Use a database account with SELECT-only permissions.");
+        notice.setWrapText(true);
+        return titled("Database verification (read-only)", new VBox(8, grid, notice));
+    }
+
     private Node buildGuide() {
-        Label guide = new Label("Input format: the selected worksheet must have 'Usage' and 'Curl' as its first two headers; 'Note' is an optional third header. "
+        Label guide = new Label("Input format: the selected worksheet must have 'Usage' and 'Curl' as its first two headers. Optional columns are 'Note', 'Data Usage', 'Unit', 'Expected iNew', and 'Expected AAX'. "
                 + "Choose the worksheet to import after selecting the Excel file.\n\n"
                 + "When preparing cURLs, the tool replaces Customer ID, Subscription ID, accessKey, current UTC timestamps and the selected Session ID value. "
                 + "Leave Customer ID, Subscription ID or Access key blank to keep the value already in each cURL. "
@@ -196,7 +235,8 @@ public final class CdrSimulatorApp extends Application {
                 + "Rows with a Usage but no cURL are marked Missing cURL and cannot be selected. "
                 + "Each Prepare or Simulate action resets the prior run's status, result, request, response, Session ID and SQL checks. "
                 + "Session ID can be auto-generated, entered exactly, or auto-generated with a user prefix. "
-                + "Leave Client ID blank to check for any non-1130 client and client 1130.");
+                + "Simulation requires a configured read-only PostgreSQL connection. A successful result requires responseDetail OK, one iNew raw row, exactly two d_cdr rows (the test client and 1130), matching charged_quantity, and matching client 1130 amount. "
+                + "Expected iNew maps to c_cdr_inew_raw.charged_quantity; Expected AAX maps to d_cdrs.amount for client 1130. Leave Client ID blank to accept one non-1130 client and client 1130.");
         guide.setWrapText(true);
         return titled("Instructions", guide);
     }
@@ -251,9 +291,14 @@ public final class CdrSimulatorApp extends Application {
         column.setCellValueFactory(cell -> switch (property) {
             case "usage" -> cell.getValue().usageProperty();
             case "note" -> cell.getValue().noteProperty();
+            case "dataUsage" -> cell.getValue().dataUsageProperty();
+            case "unit" -> cell.getValue().unitProperty();
+            case "expectedInew" -> cell.getValue().expectedInewProperty();
+            case "expectedAax" -> cell.getValue().expectedAaxProperty();
             case "type" -> cell.getValue().typeProperty();
             case "sessionId" -> cell.getValue().sessionIdProperty();
             case "status" -> cell.getValue().statusProperty();
+            case "databaseCheck" -> cell.getValue().databaseCheckProperty();
             case "request" -> cell.getValue().requestProperty();
             default -> cell.getValue().responseProperty();
         });
@@ -342,24 +387,46 @@ public final class CdrSimulatorApp extends Application {
                 || !"curl".equalsIgnoreCase(value(formatter, header.getCell(1)).trim())) {
             throw new IOException("The selected worksheet must start with the Usage and Curl columns.");
         }
-        String thirdHeader = value(formatter, header.getCell(2)).trim();
-        if (!thirdHeader.isBlank() && !"note".equalsIgnoreCase(thirdHeader)) {
-            throw new IOException("The optional third column must be named Note.");
-        }
+        Map<String, Integer> columns = optionalColumns(formatter, header);
         List<CdrRow> imported = new ArrayList<>();
         for (int index = header.getRowNum() + 1; index <= sheet.getLastRowNum(); index++) {
             Row row = sheet.getRow(index);
             if (row == null) continue;
             String usage = value(formatter, row.getCell(0));
             String curl = value(formatter, row.getCell(1));
-            String note = value(formatter, row.getCell(2));
+            String note = cellAt(formatter, row, columns, "note");
+            String dataUsage = cellAt(formatter, row, columns, "data usage");
+            String unit = cellAt(formatter, row, columns, "unit");
+            String expectedInew = cellAt(formatter, row, columns, "expected inew");
+            String expectedAax = cellAt(formatter, row, columns, "expected aax");
             if (!usage.isBlank()) {
-                imported.add(new CdrRow(usage, curl, note));
+                imported.add(new CdrRow(usage, curl, note, dataUsage, unit, expectedInew, expectedAax));
             } else if (!curl.isBlank()) {
                 throw new IOException("Row " + (index + 1) + " has a Curl but no Usage.");
             }
         }
         return imported;
+    }
+
+    private Map<String, Integer> optionalColumns(DataFormatter formatter, Row header) throws IOException {
+        Set<String> allowed = Set.of("note", "data usage", "unit", "expected inew", "expected aax");
+        Map<String, Integer> columns = new HashMap<>();
+        for (int index = 2; index < header.getLastCellNum(); index++) {
+            String name = value(formatter, header.getCell(index)).trim().toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+            if (name.isBlank()) continue;
+            if (!allowed.contains(name)) {
+                throw new IOException("Unsupported column '" + value(formatter, header.getCell(index)) + "'. Allowed optional columns: Note, Data Usage, Unit, Expected iNew, Expected AAX.");
+            }
+            if (columns.putIfAbsent(name, index) != null) {
+                throw new IOException("The worksheet contains the optional column '" + name + "' more than once.");
+            }
+        }
+        return columns;
+    }
+
+    private String cellAt(DataFormatter formatter, Row row, Map<String, Integer> columns, String columnName) {
+        Integer index = columns.get(columnName);
+        return index == null ? "" : value(formatter, row.getCell(index));
     }
 
     private String value(DataFormatter formatter, org.apache.poi.ss.usermodel.Cell cell) {
@@ -377,9 +444,17 @@ public final class CdrSimulatorApp extends Application {
             header.createCell(0).setCellValue("Usage");
             header.createCell(1).setCellValue("Curl");
             header.createCell(2).setCellValue("Note");
+            header.createCell(3).setCellValue("Data Usage");
+            header.createCell(4).setCellValue("Unit");
+            header.createCell(5).setCellValue("Expected iNew");
+            header.createCell(6).setCellValue("Expected AAX");
             sheet.setColumnWidth(0, 42 * 256);
             sheet.setColumnWidth(1, 110 * 256);
             sheet.setColumnWidth(2, 42 * 256);
+            sheet.setColumnWidth(3, 18 * 256);
+            sheet.setColumnWidth(4, 12 * 256);
+            sheet.setColumnWidth(5, 18 * 256);
+            sheet.setColumnWidth(6, 18 * 256);
             try (OutputStream output = Files.newOutputStream(file.toPath())) { workbook.write(output); }
             log("Created template: " + file.getName());
         } catch (Exception exception) {
@@ -408,6 +483,39 @@ public final class CdrSimulatorApp extends Application {
         if (sessionIdMode.getValue() != SessionIdMode.AUTO && sessionIdValue.getText().isBlank()) {
             throw new IllegalArgumentException("Enter a Session ID or prefix for the selected Session ID mode.");
         }
+    }
+
+    private DatabaseVerifier.Config databaseConfig() {
+        try {
+            return new DatabaseVerifier.Config(databaseHost.getText(), Integer.parseInt(databasePort.getText().trim()),
+                    databaseName.getText(), databaseSchema.getText().trim(), databaseUser.getText(), databasePassword.getText());
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException("Database port must be a whole number.");
+        }
+    }
+
+    private void testDatabaseConnection() {
+        final DatabaseVerifier.Config config;
+        try {
+            config = databaseConfig();
+        } catch (IllegalArgumentException exception) {
+            showError("Invalid database configuration", exception.getMessage());
+            return;
+        }
+        Task<Void> task = new Task<>() {
+            @Override protected Void call() throws Exception {
+                DatabaseVerifier.testConnection(config);
+                return null;
+            }
+        };
+        task.setOnSucceeded(event -> {
+            log("Read-only database connection verified.");
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "The application successfully ran SELECT 1 using a read-only connection.", ButtonType.OK);
+            alert.setHeaderText("Database connection verified");
+            alert.showAndWait();
+        });
+        task.setOnFailed(event -> showError("Unable to connect to database", task.getException().getMessage()));
+        new Thread(task, "database-connection-test").start();
     }
 
     private void prepare(CdrRow row) {
@@ -493,6 +601,10 @@ public final class CdrSimulatorApp extends Application {
             assertCommonConfiguration();
             List<CdrRow> selected = rows.stream().filter(row -> row.hasCurl() && row.selected.get()).toList();
             if (selected.isEmpty()) throw new IllegalArgumentException("Select at least one CDR to simulate.");
+            DatabaseVerifier.Config databaseConfig = databaseConfig();
+            String verificationClient = clientId.getText().trim();
+            validateVerificationClient(verificationClient);
+            selected.forEach(this::assertExpectedValues);
             resetRunState();
             for (CdrRow row : selected) prepare(row);
             Alert confirmation = new Alert(Alert.AlertType.CONFIRMATION,
@@ -500,9 +612,34 @@ public final class CdrSimulatorApp extends Application {
                     ButtonType.CANCEL, ButtonType.OK);
             confirmation.setHeaderText("Confirm CDR simulation");
             if (confirmation.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
-            runSimulation(selected);
+            runSimulation(selected, databaseConfig, verificationClient);
         } catch (IllegalArgumentException exception) {
             showError("Unable to simulate", exception.getMessage());
+        }
+    }
+
+    private void validateVerificationClient(String verificationClient) {
+        if (verificationClient.isBlank()) return;
+        try {
+            if (Long.parseLong(verificationClient) == 1130L) {
+                throw new IllegalArgumentException("Client ID must be different from 1130 for database verification.");
+            }
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException("Client ID must be a whole number for database verification.");
+        }
+    }
+
+    private void assertExpectedValues(CdrRow row) {
+        expectedNumber(row.expectedInew.get(), "Expected iNew", row.usage.get());
+        expectedNumber(row.expectedAax.get(), "Expected AAX", row.usage.get());
+    }
+
+    private BigDecimal expectedNumber(String text, String field, String usage) {
+        if (text == null || text.isBlank()) return null;
+        try {
+            return new BigDecimal(text.replace(",", "").trim());
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(field + " for Usage '" + usage + "' must be numeric.");
         }
     }
 
@@ -513,6 +650,7 @@ public final class CdrSimulatorApp extends Application {
             row.request.set("");
             row.response.set("");
             row.sqlCheck = "";
+            row.databaseCheck.set("");
             if (row.hasCurl()) {
                 row.status.set("Not run");
                 row.result.set("Not run");
@@ -523,9 +661,20 @@ public final class CdrSimulatorApp extends Application {
         }
     }
 
-    private void runSimulation(List<CdrRow> selected) {
+    private void runSimulation(List<CdrRow> selected, DatabaseVerifier.Config databaseConfig, String verificationClient) {
         Task<Void> task = new Task<>() {
             @Override protected Void call() {
+                try {
+                    DatabaseVerifier.testConnection(databaseConfig);
+                } catch (Exception exception) {
+                    Platform.runLater(() -> selected.forEach(row -> {
+                        row.status.set("Database connection failed");
+                        row.result.set("Failed");
+                        row.databaseCheck.set(exception.getMessage());
+                    }));
+                    return null;
+                }
+                Set<Long> claimedRawIds = new HashSet<>();
                 for (CdrRow row : selected) {
                     Platform.runLater(() -> { row.status.set("Sending"); row.result.set("Checking"); });
                     CurlProcess curlProcess = null;
@@ -540,15 +689,33 @@ public final class CdrSimulatorApp extends Application {
                             Platform.runLater(() -> { row.status.set("Timed out"); row.result.set("Failed"); row.response.set(response); });
                         } else {
                             int exit = process.exitValue();
-                            boolean success = exit == 0 && RESPONSE_DETAIL_OK.matcher(response).find();
-                            Platform.runLater(() -> {
-                                row.status.set(exit == 0 ? "Sent" : "cURL error (" + exit + ")");
-                                row.result.set(success ? "Success" : "Failed");
-                                row.response.set(response);
-                            });
+                            boolean responseAccepted = exit == 0 && RESPONSE_DETAIL_OK.matcher(response).find();
+                            if (!responseAccepted) {
+                                Platform.runLater(() -> {
+                                    row.status.set(exit == 0 ? "Response rejected" : "cURL error (" + exit + ")");
+                                    row.result.set("Failed");
+                                    row.response.set(response);
+                                });
+                            } else {
+                                Platform.runLater(() -> {
+                                    row.status.set("Verifying database");
+                                    row.response.set(response);
+                                });
+                                DatabaseVerifier.Verification verification = waitForDatabaseVerification(databaseConfig, row, verificationClient, claimedRawIds);
+                                Platform.runLater(() -> {
+                                    row.databaseCheck.set(verification.summary());
+                                    row.status.set(verification.passed() ? "Verified" : "Database verification failed");
+                                    row.result.set(verification.passed() ? "Success" : "Failed");
+                                });
+                            }
                         }
                     } catch (Exception exception) {
-                        Platform.runLater(() -> { row.status.set("Send failed"); row.result.set("Failed"); row.response.set(exception.getMessage()); });
+                        Platform.runLater(() -> {
+                            row.status.set("Simulation or database check failed");
+                            row.result.set("Failed");
+                            row.response.set(exception.getMessage());
+                            row.databaseCheck.set(exception.getMessage());
+                        });
                     } finally {
                         if (curlProcess != null) curlProcess.deleteScript();
                     }
@@ -559,6 +726,22 @@ public final class CdrSimulatorApp extends Application {
         task.setOnSucceeded(event -> log("Simulation completed for " + selected.size() + " CDRs. Export Excel to get the check SQL."));
         task.setOnFailed(event -> showError("Simulation error", task.getException().getMessage()));
         new Thread(task, "cdr-simulation").start();
+    }
+
+    private DatabaseVerifier.Verification waitForDatabaseVerification(DatabaseVerifier.Config databaseConfig, CdrRow row, String verificationClient,
+                                                                       Set<Long> claimedRawIds) throws SQLException, InterruptedException {
+        BigDecimal expectedInew = expectedNumber(row.expectedInew.get(), "Expected iNew", row.usage.get());
+        BigDecimal expectedAax = expectedNumber(row.expectedAax.get(), "Expected AAX", row.usage.get());
+        DatabaseVerifier.Verification latest = null;
+        for (int attempt = 1; attempt <= 30; attempt++) {
+            latest = DatabaseVerifier.verify(databaseConfig, row.sessionId.get(), verificationClient, expectedInew, expectedAax, claimedRawIds);
+            if (latest.passed()) {
+                claimedRawIds.add(latest.rawId());
+                return latest;
+            }
+            if (attempt < 30) Thread.sleep(1_000);
+        }
+        return latest;
     }
 
     private boolean isWindows() {
@@ -671,7 +854,7 @@ public final class CdrSimulatorApp extends Application {
         if (file == null) return;
         try (Workbook workbook = new XSSFWorkbook()) {
             Sheet sheet = workbook.createSheet("CDR Results");
-            String[] headers = {"Usage", "SQL Check", "Request", "Note", "Configuration Source", "Type", "Session ID", "Status", "Result", "Response"};
+            String[] headers = {"Usage", "Data Usage", "Unit", "Expected iNew", "Expected AAX", "Database Check", "SQL Check", "Request", "Note", "Configuration Source", "Type", "Session ID", "Status", "Result", "Response"};
             Row header = sheet.createRow(0);
             CellStyle style = workbook.createCellStyle();
             Font font = workbook.createFont(); font.setBold(true); style.setFont(font);
@@ -682,30 +865,40 @@ public final class CdrSimulatorApp extends Application {
             for (CdrRow row : rows) {
                 Row target = sheet.createRow(index++);
                 target.createCell(0).setCellValue(row.usage.get());
-                target.createCell(1).setCellValue(row.sqlCheck);
-                target.createCell(2).setCellValue(row.request.get());
-                target.createCell(3).setCellValue(row.note.get());
-                target.createCell(4).setCellValue(row.useToolConfig.get() ? "Tool configuration" : "Original cURL");
-                target.createCell(5).setCellValue(row.type.get());
-                target.createCell(6).setCellValue(row.sessionId.get());
-                target.createCell(7).setCellValue(row.status.get());
-                org.apache.poi.ss.usermodel.Cell resultCell = target.createCell(8);
+                target.createCell(1).setCellValue(row.dataUsage.get());
+                target.createCell(2).setCellValue(row.unit.get());
+                target.createCell(3).setCellValue(row.expectedInew.get());
+                target.createCell(4).setCellValue(row.expectedAax.get());
+                target.createCell(5).setCellValue(row.databaseCheck.get());
+                target.createCell(6).setCellValue(row.sqlCheck);
+                target.createCell(7).setCellValue(row.request.get());
+                target.createCell(8).setCellValue(row.note.get());
+                target.createCell(9).setCellValue(row.useToolConfig.get() ? "Tool configuration" : "Original cURL");
+                target.createCell(10).setCellValue(row.type.get());
+                target.createCell(11).setCellValue(row.sessionId.get());
+                target.createCell(12).setCellValue(row.status.get());
+                org.apache.poi.ss.usermodel.Cell resultCell = target.createCell(13);
                 resultCell.setCellValue(row.result.get());
                 if ("Success".equals(row.result.get())) resultCell.setCellStyle(successStyle);
                 if ("Failed".equals(row.result.get())) resultCell.setCellStyle(failureStyle);
-                target.createCell(9).setCellValue(row.response.get());
+                target.createCell(14).setCellValue(row.response.get());
             }
             sheet.createFreezePane(0, 1);
             sheet.setColumnWidth(0, 40 * 256);
-            sheet.setColumnWidth(1, 95 * 256);
-            sheet.setColumnWidth(2, 120 * 256);
-            sheet.setColumnWidth(3, 42 * 256);
-            sheet.setColumnWidth(4, 24 * 256);
-            sheet.setColumnWidth(5, 14 * 256);
-            sheet.setColumnWidth(6, 38 * 256);
-            sheet.setColumnWidth(7, 22 * 256);
-            sheet.setColumnWidth(8, 16 * 256);
-            sheet.setColumnWidth(9, 65 * 256);
+            sheet.setColumnWidth(1, 16 * 256);
+            sheet.setColumnWidth(2, 12 * 256);
+            sheet.setColumnWidth(3, 18 * 256);
+            sheet.setColumnWidth(4, 18 * 256);
+            sheet.setColumnWidth(5, 70 * 256);
+            sheet.setColumnWidth(6, 95 * 256);
+            sheet.setColumnWidth(7, 120 * 256);
+            sheet.setColumnWidth(8, 42 * 256);
+            sheet.setColumnWidth(9, 24 * 256);
+            sheet.setColumnWidth(10, 14 * 256);
+            sheet.setColumnWidth(11, 38 * 256);
+            sheet.setColumnWidth(12, 28 * 256);
+            sheet.setColumnWidth(13, 16 * 256);
+            sheet.setColumnWidth(14, 65 * 256);
             writeBatchCheckSheet(workbook, style);
             try (OutputStream output = Files.newOutputStream(file.toPath())) { workbook.write(output); }
             log("Exported results: " + file.getName());
@@ -871,20 +1064,29 @@ public final class CdrSimulatorApp extends Application {
         private final BooleanProperty useToolConfig = new SimpleBooleanProperty(true);
         private final StringProperty usage = new SimpleStringProperty("");
         private final StringProperty note = new SimpleStringProperty("");
+        private final StringProperty dataUsage = new SimpleStringProperty("");
+        private final StringProperty unit = new SimpleStringProperty("");
+        private final StringProperty expectedInew = new SimpleStringProperty("");
+        private final StringProperty expectedAax = new SimpleStringProperty("");
         private final StringProperty type = new SimpleStringProperty("");
         private final StringProperty sessionId = new SimpleStringProperty("");
         private final StringProperty status = new SimpleStringProperty("Not configured");
         private final StringProperty result = new SimpleStringProperty("Not run");
         private final StringProperty request = new SimpleStringProperty("");
         private final StringProperty response = new SimpleStringProperty("");
+        private final StringProperty databaseCheck = new SimpleStringProperty("");
         private final String originalCurl;
         private final boolean hasCurl;
         private String preparedCurl;
         private String sqlCheck = "";
-        private CdrRow(String usage, String originalCurl, String note) {
+        private CdrRow(String usage, String originalCurl, String note, String dataUsage, String unit, String expectedInew, String expectedAax) {
             this.usage.set(usage);
             this.originalCurl = originalCurl;
             this.note.set(note);
+            this.dataUsage.set(dataUsage);
+            this.unit.set(unit);
+            this.expectedInew.set(expectedInew);
+            this.expectedAax.set(expectedAax);
             this.hasCurl = !originalCurl.isBlank();
             this.selected.set(hasCurl);
             CdrType detected = CdrType.fromCurl(originalCurl);
@@ -899,12 +1101,17 @@ public final class CdrSimulatorApp extends Application {
         boolean hasCurl() { return hasCurl; }
         StringProperty usageProperty() { return usage; }
         StringProperty noteProperty() { return note; }
+        StringProperty dataUsageProperty() { return dataUsage; }
+        StringProperty unitProperty() { return unit; }
+        StringProperty expectedInewProperty() { return expectedInew; }
+        StringProperty expectedAaxProperty() { return expectedAax; }
         StringProperty typeProperty() { return type; }
         StringProperty sessionIdProperty() { return sessionId; }
         StringProperty statusProperty() { return status; }
         StringProperty resultProperty() { return result; }
         StringProperty requestProperty() { return request; }
         StringProperty responseProperty() { return response; }
+        StringProperty databaseCheckProperty() { return databaseCheck; }
     }
 
     public static void main(String[] args) { launch(args); }

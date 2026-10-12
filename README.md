@@ -40,12 +40,28 @@ The bundled **Run Mercury CDR Simulator** Application configuration is for macOS
 
 ## Input Excel file
 
-- Standard format: the worksheet to import starts with `Usage` and `Curl`; `Note` is an optional third column immediately to the right of `Curl`.
+- Standard format: the worksheet starts with `Usage` and `Curl`.
+- Optional columns are `Note`, `Data Usage`, `Unit`, `Expected iNew`, and `Expected AAX`.
+- `Expected iNew` is compared with `aax2.c_cdr_inew_raw.charged_quantity`.
+- `Expected AAX` is compared with `aax2.d_cdrs.amount` for client `1130`.
 - After selecting an Excel file, choose the worksheet to import. Other worksheets are not changed or read.
 
 Rows with a Usage but no Curl stay visible as `Missing cURL`, but cannot be selected, prepared, or simulated.
 
 Each cURL must contain `/charge/offline/data`, `/charge/offline/session`, or `/charge/offline/event`; an `accessKey` header; and the JSON fields `sessionBeginTimeStamp`, `startTime`, and `sessionId`.
+
+## Database verification
+
+Before simulating, configure PostgreSQL Host, Port, Database, Schema, Username, and Password in **Database verification (read-only)**. The application keeps these values only in memory.
+
+The application only executes fixed, parameterized `SELECT` statements. It never sends `INSERT`, `UPDATE`, `DELETE`, DDL, or user-entered SQL. Use a database account that has `SELECT` permissions only.
+
+After a cURL returns `"responseDetail": "OK"`, the tool waits up to 30 seconds for the database records. A CDR is successful only when all checks pass:
+
+1. A `c_cdr_inew_raw` row exists for its Session ID.
+2. Its `charged_quantity` equals `Expected iNew` when that value is supplied.
+3. Exactly two `d_cdrs` rows reference that iNew raw ID: one for the configured client (or one non-`1130` client if Client ID is blank) and one for client `1130`.
+4. The client `1130` `amount` equals `Expected AAX` when that value is supplied.
 
 ## Workflow
 
@@ -55,7 +71,7 @@ Each cURL must contain `/charge/offline/data`, `/charge/offline/session`, or `/c
 4. Choose a Session ID mode: **Auto generate** (default), **Use exact Session ID**, or **Auto generate with prefix**. An exact Session ID may be shared by multiple Usage rows.
 5. Select **Prepare cURL and SQL** to create configured cURLs and a Session ID for each CDR.
 6. Select the required rows and click **Simulate selected**. The application asks for confirmation before sending requests.
-7. A response containing exactly `"responseDetail": "OK"` is marked **Success** in green. Every other response is **Failed** in red.
+7. A response containing `"responseDetail": "OK"` proceeds to database verification. It is marked **Success** in green only after every database check passes; every rejection or mismatch is **Failed** in red.
 8. Click **Export Excel results**. The `CDR Results` sheet provides one SQL query per CDR. The `Batch Check` sheet provides one query for all generated CDRs. It returns only exceptions: no CDR created, required client missing, or client `1130` missing.
 
 Every Prepare or Simulate action starts a new run. It clears the prior Status, Result, Request, Response, Session ID, and SQL checks for all Usage rows before generating new values for the rows that are processed.
