@@ -52,7 +52,7 @@ Each cURL must contain `/charge/offline/data`, `/charge/offline/session`, or `/c
 
 ## Database verification
 
-Before simulating, configure PostgreSQL Host, Port, Database, Schema, Username, and Password in **Database verification (read-only)**. The application keeps these values only in memory.
+Before simulating, expand **Database verification (read-only)** and configure PostgreSQL Host, Port, Database, Schema, Username, and Password. Click its title again, or press `Esc` while in a database field, to collapse it. The application keeps these values only in memory.
 
 The application only executes fixed, parameterized `SELECT` statements. It never sends `INSERT`, `UPDATE`, `DELETE`, DDL, or user-entered SQL. Use a database account that has `SELECT` permissions only.
 

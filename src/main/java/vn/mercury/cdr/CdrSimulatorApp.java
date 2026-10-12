@@ -15,6 +15,8 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.control.cell.CheckBoxTableCell;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.*;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
@@ -133,7 +135,11 @@ public final class CdrSimulatorApp extends Application {
         VBox configuration = new VBox(10, buildClientConfiguration(), buildIdConfiguration(), buildSessionIdConfiguration(), buildDatabaseConfiguration(), buildGuide());
         configuration.setPadding(new Insets(0, 0, 0, 12));
         configuration.setPrefWidth(430);
-        SplitPane splitPane = new SplitPane(table, new ScrollPane(configuration));
+        ScrollPane configurationScroll = new ScrollPane(configuration);
+        configurationScroll.setFitToWidth(true);
+        configurationScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        configurationScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        SplitPane splitPane = new SplitPane(table, configurationScroll);
         splitPane.setDividerPositions(0.70);
         return splitPane;
     }
@@ -223,7 +229,19 @@ public final class CdrSimulatorApp extends Application {
         }
         Label notice = new Label("The application executes fixed SELECT queries only. Use a database account with SELECT-only permissions.");
         notice.setWrapText(true);
-        return titled("Database verification (read-only)", new VBox(8, grid, notice));
+        TitledPane pane = titled("Database verification (read-only)", new VBox(8, grid, notice));
+        pane.setCollapsible(true);
+        pane.setExpanded(false);
+        for (TextInputControl field : List.of(databaseHost, databasePort, databaseName, databaseSchema, databaseUser, databasePassword)) {
+            field.addEventFilter(KeyEvent.KEY_PRESSED, event -> {
+                if (event.getCode() == KeyCode.ESCAPE) {
+                    pane.setExpanded(false);
+                    table.requestFocus();
+                    event.consume();
+                }
+            });
+        }
+        return pane;
     }
 
     private Node buildGuide() {
